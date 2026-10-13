@@ -20,16 +20,11 @@ RUN corepack enable
 
 WORKDIR /openclaw
 
-# Pin to a known-good ref (tag/branch). Override in Railway template settings if needed.
-# Using a released tag avoids build breakage when `main` temporarily references unpublished packages.
-ARG OPENCLAW_GIT_REF=v2026.10.1
-RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/openclaw/openclaw.git .
 
-# Pin OpenClaw to a specific release
+## Pin OpenClaw to a specific release
 ARG OPENCLAW_GIT_REF=v2026.10.1
 
 RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/openclaw/openclaw.git .
-
 # Install dependencies using the release's lockfile
 RUN pnpm install --frozen-lockfile
 
@@ -54,8 +49,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 # `openclaw update` expects pnpm. Provide it in the runtime image.
-RUN corepack enable && corepack prepare pnpm@10.23.0 --activate
-
+RUN corepack enable && corepack prepare pnpm@12.5.1 --activate
 # Persist user-installed tools by default by targeting the Railway volume.
 # - npm global installs -> /data/npm
 # - pnpm global installs -> /data/pnpm (binaries) + /data/pnpm-store (store)
