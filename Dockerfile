@@ -33,8 +33,6 @@ RUN pnpm build
 
 ENV OPENCLAW_PREFER_PNPM=1
 
-RUN pnpm ui:install && pnpm ui:build
-
 
 # Runtime image
 FROM node:24-bookworm
