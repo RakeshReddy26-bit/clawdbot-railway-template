@@ -524,7 +524,7 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
       <summary><strong>Pairing helper</strong> (for “disconnected (1008): pairing required”)</summary>
       <p class="muted">This lists pending device requests and lets you approve them without SSH.</p>
       <button id="devicesRefresh" style="background:#0f172a">Refresh pending devices</button>
-      <div id="devicesList" class="muted" style="margin-top:0.5rem"></div>
+      <div id="devicesList" class="muted" style="margin-top:0.5rem; white-space:pre-wrap"></div>
     </details>
   </div>
 
@@ -1132,7 +1132,46 @@ app.post("/setup/api/pairing/approve", requireSetupAuth, async (req, res) => {
 });
 
 // Device pairing helper (list + approve) to avoid needing SSH.
+// OpenClaw 2026.10+ prints pending requests as a table ("Request" column), which the
+// text matcher below cannot read, so ask for JSON first. Older CLIs without --json fall
+// back to the text output. Only request ids and a short summary leave the server; the
+// raw JSON (which also lists paired devices) is never sent to the browser.
+function parseDevicePairingJson(output) {
+  const text = String(output || "");
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1));
+    return parsed && Array.isArray(parsed.pending) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function summarizePendingDevices(pending) {
+  if (!pending.length) return "";
+  const lines = [`Pending (${pending.length})`];
+  for (const req of pending) {
+    const device = typeof req.deviceId === "string" ? req.deviceId.slice(0, 12) : "?";
+    const client = [req.clientId, req.clientMode, req.platform].filter((v) => typeof v === "string" && v).join(" / ");
+    lines.push(`- ${req.requestId}  device ${device}${client ? `  (${client})` : ""}`);
+  }
+  return lines.join("\n");
+}
+
 app.get("/setup/api/devices/pending", requireSetupAuth, async (_req, res) => {
+  const asJson = await runCmd(OPENCLAW_NODE, clawArgs(["devices", "list", "--json"]));
+  const list = asJson.code === 0 ? parseDevicePairingJson(asJson.output) : null;
+  if (list) {
+    const pending = list.pending.filter((req) => req && typeof req.requestId === "string" && req.requestId);
+    return res.json({
+      ok: true,
+      requestIds: pending.map((req) => req.requestId),
+      output: redactSecrets(summarizePendingDevices(pending)),
+    });
+  }
+
   const r = await runCmd(OPENCLAW_NODE, clawArgs(["devices", "list"]));
   const output = redactSecrets(r.output);
   const requestIds = extractDeviceRequestIds(output);

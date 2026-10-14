@@ -325,7 +325,8 @@
     return httpJson('/setup/api/devices/pending').then(function (j) {
       var ids = j.requestIds || [];
       if (!ids.length) {
-        devicesListEl.textContent = 'No pending device requests found.';
+        // Show what the CLI printed, so a format we cannot parse is visible instead of silent.
+        devicesListEl.textContent = 'No pending device requests found.' + (j.output ? '\n\n' + j.output : '');
         return;
       }
       devicesListEl.innerHTML = '';
