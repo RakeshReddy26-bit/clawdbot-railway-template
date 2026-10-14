@@ -1331,9 +1331,17 @@ proxy.on("error", (err, _req, res) => {
 // --- Dashboard password protection ---
 // Require the same SETUP_PASSWORD for the entire Control UI dashboard,
 // not just the /setup routes.  Healthcheck is excluded so Railway probes work.
+// One definition of "webhook path", shared by the dashboard-auth bypass and the
+// token injection. WHATWG URL parsing resolves dot segments, so "/hooks/../x"
+// is "/x" here and does not inherit the webhook bypass; "/hooksX" is not a hook.
+function isHookRequest(req) {
+  const pathname = new URL(req.url ?? "/", "http://wrapper.local").pathname;
+  return pathname === "/hooks" || pathname.startsWith("/hooks/");
+}
+
 function requireDashboardAuth(req, res, next) {
   if (req.path === "/healthz" || req.path === "/setup/healthz") return next();
-  if (req.path.startsWith("/hooks")) return next(); // allow OpenClaw webhook endpoints to bypass dashboard auth
+  if (isHookRequest(req)) return next(); // webhooks use their own hook token, never the dashboard password
   if (!SETUP_PASSWORD) return next(); // no password configured → open
   const header = req.headers.authorization || "";
   const [scheme, encoded] = header.split(" ");
@@ -1352,13 +1360,16 @@ function requireDashboardAuth(req, res, next) {
 }
 
 // --- Gateway token injection ---
-// The gateway is only reachable from this container. The Control UI in the browser
-// cannot set custom Authorization headers for WebSocket connections, so we inject
-// the token into proxied requests at the wrapper level.
+// The wrapper authenticates the browser itself (SETUP_PASSWORD via Basic auth).
+// The gateway only understands its own Bearer token, so after the wrapper's check
+// we REPLACE whatever Authorization the client sent:
+// - the gateway gets the token it expects
+// - the setup password never leaves the wrapper
+// Webhooks (/hooks) are the exception: they carry their own hook credentials
+// and must never be upgraded to the gateway admin token.
 function attachGatewayAuthHeader(req) {
-  if (!req?.headers?.authorization && OPENCLAW_GATEWAY_TOKEN) {
-    req.headers.authorization = `Bearer ${OPENCLAW_GATEWAY_TOKEN}`;
-  }
+  if (!req?.headers || !OPENCLAW_GATEWAY_TOKEN || isHookRequest(req)) return;
+  req.headers.authorization = `Bearer ${OPENCLAW_GATEWAY_TOKEN}`;
 }
 
 proxy.on("proxyReqWs", (_proxyReq, req) => {
