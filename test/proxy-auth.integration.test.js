@@ -273,6 +273,85 @@ test("dot-segment path that escapes /hooks does not bypass the dashboard passwor
   assert.equal(lastSeen("/hooks/../admin-probe"), undefined);
 });
 
+// --- One invariant across tricky paths: the admin token is only ever attached
+// to requests that passed the dashboard password. Covers dot segments, encoded
+// dots, duplicate slashes, case and encoding variants. ---
+
+const TRICKY_PATHS = [
+  "/hooks/%2e%2e/escape-a",
+  "/hooks/.%2e/escape-b",
+  "/hooks/..%2fescape-c",
+  "/hooks%2fescape-d",
+  "//hooks/escape-e",
+  "/./hooks/escape-f",
+  "/escape-g/../hooks/x",
+  "/HOOKS/escape-h",
+  "/%68ooks/escape-i",
+  "/hooks;escape-j",
+  "/hooks?escape=k",
+];
+
+for (const tricky of TRICKY_PATHS) {
+  test(`unauthenticated ${tricky}: rejected, or forwarded without the admin token`, async () => {
+    const before = gateway.seen.length;
+    const res = await request(wrapperPort, { path: tricky });
+    const forwarded = gateway.seen.slice(before);
+    if (res.status === 401) {
+      assert.equal(forwarded.length, 0, "rejected requests must not reach the gateway");
+    } else {
+      for (const record of forwarded) {
+        assert.notEqual(record.headers.authorization, `Bearer ${GATEWAY_TOKEN}`);
+      }
+    }
+  });
+}
+
+// --- Request bodies: only /setup is parsed by the wrapper; everything else streams through ---
+
+test("JSON webhook body reaches the gateway intact", { timeout: 5000 }, async () => {
+  const payload = JSON.stringify({ message: "hello from a webhook" });
+  const res = await request(wrapperPort, {
+    method: "POST",
+    path: "/hooks/json-body",
+    headers: {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(payload),
+      Authorization: "Bearer caller-hook-token",
+    },
+    body: payload,
+  });
+  assert.equal(res.status, 200);
+  assert.equal(lastSeen("/hooks/json-body").body, payload);
+});
+
+test("authenticated JSON request to the dashboard reaches the gateway intact", { timeout: 5000 }, async () => {
+  const payload = JSON.stringify({ hello: "gateway" });
+  const res = await request(wrapperPort, {
+    method: "POST",
+    path: "/dashboard-json-body",
+    headers: {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(payload),
+      Authorization: basic(SETUP_PASSWORD),
+    },
+    body: payload,
+  });
+  assert.equal(res.status, 200);
+  assert.equal(lastSeen("/dashboard-json-body").body, payload);
+});
+
+test("/setup API still parses JSON bodies", async () => {
+  // "Invalid" (not "Missing") proves the wrapper parsed the JSON body.
+  const res = await request(wrapperPort, {
+    method: "POST",
+    path: "/setup/api/devices/approve",
+    headers: { "content-type": "application/json", Authorization: basic(SETUP_PASSWORD) },
+    body: JSON.stringify({ requestId: "not a valid id!" }),
+  });
+  assert.equal(res.status, 400);
+  assert.match(res.body, /Invalid device request ID/);
+});
+
 // --- WebSocket upgrades ---
 
 test("WebSocket upgrade carrying Basic credentials is forwarded with Bearer only", async () => {

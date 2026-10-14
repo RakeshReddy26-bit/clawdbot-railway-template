@@ -297,7 +297,10 @@ function requireSetupAuth(req, res, next) {
 
 const app = express();
 app.disable("x-powered-by");
-app.use(express.json({ limit: "1mb" }));
+// Parse JSON only for the wrapper's own /setup API. Everything else is proxied
+// to the gateway as a raw stream; parsing it here would consume the body and the
+// gateway would wait forever for bytes that never arrive (e.g. JSON webhooks).
+app.use("/setup", express.json({ limit: "1mb" }));
 
 // Minimal health endpoint for Railway.
 app.get("/setup/healthz", (_req, res) => res.json({ ok: true }));
