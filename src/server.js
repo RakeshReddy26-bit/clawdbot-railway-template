@@ -1342,24 +1342,25 @@ function isHookRequest(req) {
   return pathname === "/hooks" || pathname.startsWith("/hooks/");
 }
 
-function requireDashboardAuth(req, res, next) {
-  if (req.path === "/healthz" || req.path === "/setup/healthz") return next();
-  if (isHookRequest(req)) return next(); // webhooks use their own hook token, never the dashboard password
-  if (!SETUP_PASSWORD) return next(); // no password configured → open
+// "missing" | "invalid" | "ok" for the dashboard Basic credentials on a request.
+function dashboardAuthStatus(req) {
+  if (!SETUP_PASSWORD) return "ok"; // no password configured → open
   const header = req.headers.authorization || "";
   const [scheme, encoded] = header.split(" ");
-  if (scheme !== "Basic" || !encoded) {
-    res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
-    return res.status(401).send("Auth required");
-  }
+  if (scheme !== "Basic" || !encoded) return "missing";
   const decoded = Buffer.from(encoded, "base64").toString("utf8");
   const idx = decoded.indexOf(":");
   const password = idx >= 0 ? decoded.slice(idx + 1) : "";
-  if (password !== SETUP_PASSWORD) {
-    res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
-    return res.status(401).send("Invalid password");
-  }
-  return next();
+  return password === SETUP_PASSWORD ? "ok" : "invalid";
+}
+
+function requireDashboardAuth(req, res, next) {
+  if (req.path === "/healthz" || req.path === "/setup/healthz") return next();
+  if (isHookRequest(req)) return next(); // webhooks use their own hook token, never the dashboard password
+  const status = dashboardAuthStatus(req);
+  if (status === "ok") return next();
+  res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
+  return res.status(401).send(status === "missing" ? "Auth required" : "Invalid password");
 }
 
 // --- Gateway token injection ---
@@ -1375,9 +1376,19 @@ function attachGatewayAuthHeader(req) {
   req.headers.authorization = `Bearer ${OPENCLAW_GATEWAY_TOKEN}`;
 }
 
-proxy.on("proxyReqWs", (_proxyReq, req) => {
-  attachGatewayAuthHeader(req);
-});
+// WebSocket upgrades are not gated by the dashboard password (the gateway
+// authenticates sockets itself, in the connect frame), so the admin token is
+// only attached when the upgrade proves the dashboard password. Anonymous
+// upgrades are forwarded with whatever credentials the client sent, minus
+// any Basic header, so the gateway judges them on their own merits.
+function prepareUpgradeAuthHeader(req) {
+  if (isHookRequest(req)) return;
+  if (dashboardAuthStatus(req) === "ok") {
+    attachGatewayAuthHeader(req);
+  } else if (/^basic\b/i.test(req.headers.authorization || "")) {
+    delete req.headers.authorization;
+  }
+}
 
 app.use(requireDashboardAuth, async (req, res) => {
   // If not configured, force users to /setup for any non-setup routes.
@@ -1474,9 +1485,9 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
 });
 
 server.on("upgrade", async (req, socket, head) => {
-  // Note: browsers cannot attach arbitrary HTTP headers (including Authorization: Basic)
-  // in WebSocket handshakes. Do not enforce dashboard Basic auth at the upgrade layer.
-  // The gateway authenticates at the protocol layer and we inject the gateway token below.
+  // Browsers cannot reliably attach Authorization to WebSocket handshakes, so the
+  // dashboard password is not enforced here; the gateway authenticates sockets at
+  // the protocol layer. See prepareUpgradeAuthHeader for what is forwarded.
 
   if (!isConfigured()) {
     socket.destroy();
@@ -1488,7 +1499,7 @@ server.on("upgrade", async (req, socket, head) => {
     socket.destroy();
     return;
   }
-  attachGatewayAuthHeader(req);
+  prepareUpgradeAuthHeader(req);
   proxy.ws(req, socket, head, { target: GATEWAY_TARGET });
 });
 

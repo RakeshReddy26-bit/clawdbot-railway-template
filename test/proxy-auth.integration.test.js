@@ -366,8 +366,36 @@ test("WebSocket upgrade carrying Basic credentials is forwarded with Bearer only
   assertNoSetupPassword(seen);
 });
 
-test("WebSocket upgrade without credentials still receives the gateway token (existing behavior)", async () => {
+test("anonymous WebSocket upgrade is forwarded without the gateway token", async () => {
   const status = await upgrade(wrapperPort, { path: "/ws-plain-probe" });
-  assert.equal(status, 101);
-  assert.equal(lastSeen("/ws-plain-probe").headers.authorization, `Bearer ${GATEWAY_TOKEN}`);
+  assert.equal(status, 101); // still reaches the gateway, which authenticates the connect frame
+  assert.equal(lastSeen("/ws-plain-probe").headers.authorization, undefined);
 });
+
+test("WebSocket upgrade with a wrong password gets no token and no Basic header upstream", async () => {
+  const status = await upgrade(wrapperPort, {
+    path: "/ws-wrong-password-probe",
+    headers: { Authorization: basic("not-the-password") },
+  });
+  assert.equal(status, 101);
+  assert.equal(lastSeen("/ws-wrong-password-probe").headers.authorization, undefined);
+});
+
+test("WebSocket upgrade with its own Bearer is forwarded untouched, not upgraded", async () => {
+  const status = await upgrade(wrapperPort, {
+    path: "/ws-own-bearer-probe",
+    headers: { Authorization: "Bearer caller-supplied" },
+  });
+  assert.equal(status, 101);
+  assert.equal(lastSeen("/ws-own-bearer-probe").headers.authorization, "Bearer caller-supplied");
+});
+
+for (const tricky of TRICKY_PATHS) {
+  test(`anonymous WebSocket upgrade to ${tricky} never carries the gateway token`, async () => {
+    const before = gateway.seen.length;
+    await upgrade(wrapperPort, { path: tricky });
+    for (const record of gateway.seen.slice(before)) {
+      assert.notEqual(record.headers.authorization, `Bearer ${GATEWAY_TOKEN}`);
+    }
+  });
+}
