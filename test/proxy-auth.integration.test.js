@@ -352,6 +352,75 @@ test("/setup API still parses JSON bodies", async () => {
   assert.match(res.body, /Invalid device request ID/);
 });
 
+// --- The Control UI's own Bearer requests (avatars, icons, reachability probes) ---
+// OpenClaw 2026.10 sends `Authorization: Bearer <deviceToken>`, then `Bearer <gatewayToken>`,
+// on some reads. An explicit Authorization header replaces the browser's saved Basic login,
+// so a Basic challenge here makes Chrome pop the sign-in dialog again and again.
+
+test("Bearer <gateway token> is accepted on dashboard routes and forwarded as-is", async () => {
+  const res = await request(wrapperPort, {
+    path: "/api/users/gateway-owner/avatar",
+    headers: { Authorization: `Bearer ${GATEWAY_TOKEN}` },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers["www-authenticate"], undefined);
+  assert.equal(lastSeen("/api/users/gateway-owner/avatar").headers.authorization, `Bearer ${GATEWAY_TOKEN}`);
+});
+
+test("unknown Bearer gets a plain 401: no Basic challenge, never reaches the gateway", async () => {
+  for (const scheme of ["Bearer", "bearer"]) {
+    const res = await request(wrapperPort, {
+      path: "/__openclaw__/workspace-icon/agent:main:main",
+      headers: { Authorization: `${scheme} device-token-the-wrapper-cannot-verify` },
+    });
+    assert.equal(res.status, 401);
+    assert.equal(res.headers["www-authenticate"], undefined, "a Basic challenge here re-opens Chrome's sign-in popup");
+    assert.equal(lastSeen("/__openclaw__/workspace-icon/agent:main:main"), undefined);
+  }
+});
+
+test("Control UI candidate loop (device token, then gateway token) never triggers a Basic challenge", async () => {
+  const challenges = [];
+  let final;
+  for (const token of ["device-token-from-hello", GATEWAY_TOKEN]) {
+    final = await request(wrapperPort, {
+      method: "HEAD",
+      path: "/control-ui-config.json?probe=1",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (final.headers["www-authenticate"]) challenges.push(final.headers["www-authenticate"]);
+    if (final.status !== 401) break;
+  }
+  assert.deepEqual(challenges, []);
+  assert.equal(final.status, 200);
+});
+
+test("password gate is intact: no credentials and wrong Basic still get the Basic challenge", async () => {
+  for (const headers of [{}, { Authorization: basic("wrong-password") }]) {
+    const res = await request(wrapperPort, { path: "/control-ui-config.json?gate=1", headers });
+    assert.equal(res.status, 401);
+    assert.match(res.headers["www-authenticate"] ?? "", /^Basic /);
+  }
+});
+
+test("a token that merely starts like the gateway token is rejected", async () => {
+  for (const almost of [GATEWAY_TOKEN.slice(0, -1), `${GATEWAY_TOKEN}x`, ` ${GATEWAY_TOKEN}`]) {
+    const res = await request(wrapperPort, {
+      path: "/control-ui-config.json?almost=1",
+      headers: { Authorization: `Bearer ${almost}` },
+    });
+    assert.equal(res.status, 401);
+  }
+});
+
+test("/setup does not accept the gateway token instead of the setup password", async () => {
+  const res = await request(wrapperPort, {
+    path: "/setup/api/status",
+    headers: { Authorization: `Bearer ${GATEWAY_TOKEN}` },
+  });
+  assert.equal(res.status, 401);
+});
+
 // --- WebSocket upgrades ---
 
 test("WebSocket upgrade carrying Basic credentials is forwarded with Bearer only", async () => {

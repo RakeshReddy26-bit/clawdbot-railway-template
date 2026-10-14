@@ -1382,15 +1382,34 @@ function isHookRequest(req) {
 }
 
 // "missing" | "invalid" | "ok" for the dashboard Basic credentials on a request.
+function safeEqualString(a, b) {
+  const left = Buffer.from(String(a), "utf8");
+  const right = Buffer.from(String(b), "utf8");
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+// "ok" | "missing" | "invalid" | "bearer-rejected" for a dashboard request.
+//
+// The OpenClaw Control UI sends its own `Authorization: Bearer <token>` on some reads
+// (avatars, workspace icons, reachability probes), trying its device token first and
+// the gateway token second. An explicit Authorization header replaces the browser's
+// saved Basic login, so those requests never carry the dashboard password. The gateway
+// token is accepted here because it already grants full access over the WebSocket;
+// any other Bearer is rejected without a Basic challenge (see requireDashboardAuth).
 function dashboardAuthStatus(req) {
   if (!SETUP_PASSWORD) return "ok"; // no password configured → open
   const header = req.headers.authorization || "";
   const [scheme, encoded] = header.split(" ");
+  if (/^bearer$/i.test(scheme || "")) {
+    return OPENCLAW_GATEWAY_TOKEN && encoded && safeEqualString(encoded, OPENCLAW_GATEWAY_TOKEN)
+      ? "ok"
+      : "bearer-rejected";
+  }
   if (scheme !== "Basic" || !encoded) return "missing";
   const decoded = Buffer.from(encoded, "base64").toString("utf8");
   const idx = decoded.indexOf(":");
   const password = idx >= 0 ? decoded.slice(idx + 1) : "";
-  return password === SETUP_PASSWORD ? "ok" : "invalid";
+  return safeEqualString(password, SETUP_PASSWORD) ? "ok" : "invalid";
 }
 
 function requireDashboardAuth(req, res, next) {
@@ -1398,6 +1417,11 @@ function requireDashboardAuth(req, res, next) {
   if (isHookRequest(req)) return next(); // webhooks use their own hook token, never the dashboard password
   const status = dashboardAuthStatus(req);
   if (status === "ok") return next();
+  if (status === "bearer-rejected") {
+    // No WWW-Authenticate: a Basic challenge on the UI's Bearer fetches makes Chrome
+    // open the sign-in dialog again and again. The UI moves on to its next credential.
+    return res.status(401).json({ error: { message: "Unauthorized", type: "unauthorized" } });
+  }
   res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
   return res.status(401).send(status === "missing" ? "Auth required" : "Invalid password");
 }
